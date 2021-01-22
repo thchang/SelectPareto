@@ -298,7 +298,7 @@ CONTAINS
           L = K - K / D
           R = L + (SIZE(VALUES, 2) / D)
           ! Perform fast select on an array a fraction of the size about K.
-          CALL ARGSELECT_DVEC(VALUES(:, L:R), INDICES(L:R, :), &
+          CALL ARGSELECT_DVEC(VALUES(:, L:R), INDICES(L:R), &
                               K - L + 1, DIVISOR, MAX_SIZE)
        END IF
        ! Pick a partition element at position K.
@@ -496,6 +496,35 @@ CONTAINS
   END SUBROUTINE INSERTION_ARGSORT_R64
   ! ------------------------------------------------------------------
 
+  ! ------------------------------------------------------------------
+  !            FastSort by sum for 2D double precision vectors
+  ! 
+  ! This routine uses a combination of QuickSort (with modestly
+  ! intelligent pivot selection) and Insertion Sort (for small arrays)
+  ! to achieve very fast average case sort times for both random and
+  ! partially sorted data. The pivot is selected for QuickSort as the
+  ! median of the first, middle, and last values in the array.
+  ! 
+  ! Arguments:
+  ! 
+  !   VALUES   --  A 2D array of real numbers.
+  !   INDICES  --  A 1D array of original indices for elements of VALUES.
+  ! 
+  ! Optional:
+  ! 
+  !   MIN_SIZE --  An positive integer that represents the largest
+  !                sized VALUES for which a partition about a pivot
+  !                is used to reduce the size of a an unsorted array.
+  !                Any size less than this will result in the use of
+  !                INSERTION_ARGSORT instead of ARGPARTITION.
+  ! 
+  ! Output:
+  ! 
+  !   The columns of VALUES are sorted by their sum, and all elements of
+  !   INDICES are sorted symmetrically (given INDICES = 1, ...,
+  !   SIZE(VALUES) beforehand, final INDICES will show original index
+  !   of each element of VALUES before the sort operation).
+  ! 
   RECURSIVE SUBROUTINE ARGSORT_DVEC(VALUES, INDICES, MIN_SIZE)
     REAL(KIND=REAL64),   INTENT(INOUT), DIMENSION(:, :)            :: VALUES
     INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(SIZE(VALUES, 2)) :: INDICES
@@ -530,14 +559,14 @@ CONTAINS
   FUNCTION ARGPARTITION_DVEC(VALUES, INDICES) RESULT(LEFT)
     REAL(KIND=REAL64),   INTENT(INOUT), DIMENSION(:, :)            :: VALUES
     INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(SIZE(VALUES, 2)) :: INDICES
-    INTEGER(KIND=INT64) :: LEFT, MID, RIGHT
+    INTEGER(KIND=INT64) :: LEFT, MID, RIGHT, LVEC
     REAL(KIND=REAL64)   :: PIVOT
     ! Use the median of the first, middle, and last element as the
     ! pivot. Place the pivot at the end of the array.
     MID = (1 + SIZE(VALUES, 2)) / 2
     LVEC = SIZE(VALUES, 1)
     ! Swap the first and last elements (if the last is smaller).
-    IF (SUM(VALUES(:, SIZE(VALUES))) < SUM(VALUES(:, 1))) THEN
+    IF (SUM(VALUES(:, SIZE(VALUES, 2))) < SUM(VALUES(:, 1))) THEN
        CALL DSWAP(LVEC, VALUES(:, 1), 1, VALUES(:, SIZE(VALUES, 2)), 1)
        CALL SWAP_I64(INDICES(1), INDICES(SIZE(VALUES, 2)))
     END IF
@@ -603,7 +632,7 @@ CONTAINS
     ! Insertion sort the rest of the array.
     DO I = 3, SIZE(VALUES, 2)
        TEMP_VAL(:) = VALUES(:, I)
-       TEMP_IND = INDICES(I, :)
+       TEMP_IND = INDICES(I)
        ! Search backwards in the list, 
        BEFORE = I - 1
        AFTER  = I

@@ -260,6 +260,84 @@ CONTAINS
        IF (K .LE. R) RIGHT = R - 1
     END DO
   END SUBROUTINE ARGSELECT_I64
+
+  ! ------------------------------------------------------------------
+
+  RECURSIVE SUBROUTINE ARGSELECT_DVEC(VALUES, INDICES, K, DIVISOR, MAX_SIZE)
+    ! Arguments
+    REAL(KIND=REAL64),   INTENT(INOUT), DIMENSION(:, :) :: VALUES
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: INDICES
+    INTEGER(KIND=INT64), INTENT(IN)                  :: K
+    INTEGER(KIND=INT64), INTENT(IN), OPTIONAL        :: DIVISOR, MAX_SIZE
+    ! Locals
+    INTEGER(KIND=INT64) :: LEFT, RIGHT, L, R, MS, D, LVEC
+    REAL(KIND=REAL64) :: P
+    ! External LAPACK subroutines
+    EXTERNAL :: DSWAP
+    ! Initialize the divisor (for making subsets).
+    IF (PRESENT(DIVISOR)) THEN ; D = DIVISOR
+    ELSE IF (SIZE(VALUES, 2) .GE. 2**23) THEN ; D = 2**5
+    ELSE IF (SIZE(VALUES, 2) .GE. 2**20) THEN ; D = 2**3
+    ELSE                                   ; D = 2**2
+    END IF
+    ! Initialize the max size (before subsets are created).
+    IF (PRESENT(MAX_SIZE)) THEN ; MS = MAX_SIZE
+    ELSE                        ; MS = 2**10
+    END IF
+    ! Initialize LEFT and RIGHT to be the entire array.
+    LEFT = 1
+    RIGHT = SIZE(VALUES, 2)
+    LVEC = SIZE(VALUES, 1)
+    ! Loop until done finding the K-th element.
+    DO WHILE (LEFT .LT. RIGHT)
+       ! Use SELECT recursively to improve the quality of the
+       ! selected pivot value for large arrays.
+       IF (RIGHT - LEFT .GT. MS) THEN
+          ! Compute how many elements should be left and right of K
+          ! to maintain the same percentile in a subset.
+          L = K - K / D
+          R = L + (SIZE(VALUES, 2) / D)
+          ! Perform fast select on an array a fraction of the size about K.
+          CALL ARGSELECT_DVEC(VALUES(:, L:R), INDICES(L:R, :), &
+                              K - L + 1, DIVISOR, MAX_SIZE)
+       END IF
+       ! Pick a partition element at position K.
+       P = SUM(VALUES(:, K))
+       L = LEFT
+       R = RIGHT
+       ! Move the partition element to the front of the list.
+       CALL DSWAP(LVEC, VALUES(:, LEFT), 1, VALUES(:, K), 1)
+       CALL SWAP_I64(INDICES(LEFT), INDICES(K))
+       ! Pre-swap the left and right elements (temporarily putting a
+       ! larger element on the left) before starting the partition loop.
+       IF (SUM(VALUES(:, RIGHT)) .GT. P) THEN
+          CALL DSWAP(LVEC, VALUES(:, LEFT), 1, VALUES(:, RIGHT), 1)
+          CALL SWAP_I64(INDICES(LEFT), INDICES(RIGHT))
+       END IF
+       ! Now partition the elements about the pivot value "P".
+       DO WHILE (L .LT. R)
+          CALL DSWAP(LVEC, VALUES(:, L), 1, VALUES(:, R), 1)
+          CALL SWAP_I64(INDICES(L), INDICES(R))
+          L = L + 1
+          R = R - 1
+          DO WHILE (SUM(VALUES(:, L)) .LT. P) ; L = L + 1 ; END DO
+          DO WHILE (SUM(VALUES(:, R)) .GT. P) ; R = R - 1 ; END DO
+       END DO
+       ! Place the pivot element back into its appropriate place.
+       IF (SUM(VALUES(:, LEFT)) .EQ. P) THEN
+          CALL DSWAP(LVEC, VALUES(:, LEFT), 1, VALUES(:, R), 1)
+          CALL SWAP_I64(INDICES(LEFT), INDICES(R))
+       ELSE
+          R = R + 1
+          CALL DSWAP(LVEC, VALUES(:, R), 1, VALUES(:, RIGHT), 1)
+          CALL SWAP_I64(INDICES(R), INDICES(RIGHT))
+       END IF
+       ! adjust left and right towards the boundaries of the subset
+       ! containing the (k - left + 1)th smallest element
+       IF (R .LE. K) LEFT = R + 1
+       IF (K .LE. R) RIGHT = R - 1
+    END DO
+  END SUBROUTINE ARGSELECT_DVEC
 END MODULE FAST_SELECT
 ! ____________________________________________________________________
 
@@ -418,4 +496,127 @@ CONTAINS
   END SUBROUTINE INSERTION_ARGSORT_R64
   ! ------------------------------------------------------------------
 
+  RECURSIVE SUBROUTINE ARGSORT_DVEC(VALUES, INDICES, MIN_SIZE)
+    REAL(KIND=REAL64),   INTENT(INOUT), DIMENSION(:, :)            :: VALUES
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(SIZE(VALUES, 2)) :: INDICES
+    INTEGER(KIND=INT64), INTENT(IN), OPTIONAL                      :: MIN_SIZE
+    ! Local variables
+    INTEGER(KIND=INT64) :: I, MS
+    IF (PRESENT(MIN_SIZE)) THEN ; MS = MIN_SIZE
+    ELSE                        ; MS = 2**6
+    END IF
+    ! Base case, return.
+    IF (SIZE(VALUES, 2) .LT. MS) THEN
+       CALL INSERTION_ARGSORT_DVEC(VALUES, INDICES)
+       ! Call this function recursively after pivoting about the median.
+    ELSE
+       ! ---------------------------------------------------------------
+       ! If you are having slow runtime with the selection of pivot values 
+       ! provided by ARGPARTITION, then consider using ARGSELECT instead.
+       I = ARGPARTITION_DVEC(VALUES, INDICES)
+       ! ---------------------------------------------------------------
+       ! I = SIZE(VALUES) / 2
+       ! CALL ARGSELECT_R64(VALUES, INDICES, I)
+       ! ! Requires 'USE FAST_SELECT' at top of subroutine or module.
+       ! ---------------------------------------------------------------
+       CALL ARGSORT_DVEC(VALUES(:, :I-1), INDICES(:I-1), MS)
+       CALL ARGSORT_DVEC(VALUES(:, I+1:), INDICES(I+1:), MS)
+    END IF
+  END SUBROUTINE ARGSORT_DVEC
+
+  ! This function efficiently partitions values based on the median
+  ! of the first, middle, and last elements of the VALUES array. This
+  ! function returns the index of the pivot.
+  FUNCTION ARGPARTITION_DVEC(VALUES, INDICES) RESULT(LEFT)
+    REAL(KIND=REAL64),   INTENT(INOUT), DIMENSION(:, :)            :: VALUES
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(SIZE(VALUES, 2)) :: INDICES
+    INTEGER(KIND=INT64) :: LEFT, MID, RIGHT
+    REAL(KIND=REAL64)   :: PIVOT
+    ! Use the median of the first, middle, and last element as the
+    ! pivot. Place the pivot at the end of the array.
+    MID = (1 + SIZE(VALUES, 2)) / 2
+    LVEC = SIZE(VALUES, 1)
+    ! Swap the first and last elements (if the last is smaller).
+    IF (SUM(VALUES(:, SIZE(VALUES))) < SUM(VALUES(:, 1))) THEN
+       CALL DSWAP(LVEC, VALUES(:, 1), 1, VALUES(:, SIZE(VALUES, 2)), 1)
+       CALL SWAP_I64(INDICES(1), INDICES(SIZE(VALUES, 2)))
+    END IF
+    ! Swap the middle and first elements (if the middle is smaller).
+    IF (SUM(VALUES(:, MID)) < SUM(VALUES(:, SIZE(VALUES, 2)))) THEN
+       CALL DSWAP(LVEC, VALUES(:, MID), 1, VALUES(:, SIZE(VALUES, 2)), 1)
+       CALL SWAP_I64(INDICES(MID), INDICES(SIZE(VALUES, 2)))       
+       ! Swap the last and first elements (if the last is smaller).
+       IF (SUM(VALUES(:, SIZE(VALUES, 2))) < SUM(VALUES(:, 1))) THEN
+          CALL DSWAP(LVEC, VALUES(:, 1), 1, VALUES(:, SIZE(VALUES, 2)), 1)
+          CALL SWAP_I64(INDICES(1), INDICES(SIZE(VALUES, 2)))
+       END IF
+    END IF
+    ! Set the pivot, LEFT index and RIGHT index (skip the smallest,
+    ! which is in location 1, and the pivot at the end).
+    PIVOT = SUM(VALUES(:, SIZE(VALUES, 2)))
+    LEFT  = 2
+    RIGHT = SIZE(VALUES, 2) - 1
+    ! Partition all elements to the left and right side of the pivot
+    ! (left if they are smaller, right if they are bigger).
+    DO WHILE (LEFT < RIGHT)
+       ! Loop left until we find a value that is greater or equal to pivot.
+       DO WHILE (SUM(VALUES(:, LEFT)) < PIVOT)
+          LEFT = LEFT + 1
+       END DO
+       ! Loop right until we find a value that is less or equal to pivot (or LEFT).
+       DO WHILE (RIGHT .NE. LEFT)
+          IF (SUM(VALUES(:, RIGHT)) .LT. PIVOT) EXIT
+          RIGHT = RIGHT - 1
+       END DO
+       ! Now we know that [SUM(VALUES(:, RIGHT)) < PIVOT < SUM(VALUES(:, LEFT))], so swap them.
+       CALL DSWAP(LVEC, VALUES(:, LEFT), 1, VALUES(:, RIGHT), 1)
+       CALL SWAP_I64(INDICES(LEFT), INDICES(RIGHT))
+    END DO
+    ! The last swap was done even though LEFT == RIGHT, we need to undo.
+    CALL DSWAP(LVEC, VALUES(:, LEFT), 1, VALUES(:, RIGHT), 1)
+    CALL SWAP_I64(INDICES(LEFT), INDICES(RIGHT))
+    ! Finally, we put the pivot back into its proper location.
+    CALL DSWAP(LVEC, VALUES(:, LEFT), 1, VALUES(:, SIZE(VALUES, 2)), 1)
+    CALL SWAP_I64(INDICES(LEFT), INDICES(SIZE(VALUES, 2)))
+  END FUNCTION ARGPARTITION_DVEC
+
+  ! Insertion sort (best for small lists).
+  SUBROUTINE INSERTION_ARGSORT_DVEC(VALUES, INDICES)
+    REAL(KIND=REAL64),   INTENT(INOUT), DIMENSION(:, :)            :: VALUES
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(SIZE(VALUES, 2)) :: INDICES
+    ! Local variables.
+    REAL(KIND=REAL64), DIMENSION(SIZE(VALUES, 1)) :: TEMP_VAL
+    INTEGER(KIND=INT64) :: I, BEFORE, AFTER, TEMP_IND
+    ! Return for the base case.
+    IF (SIZE(VALUES, 2) .LE. 1) RETURN
+    ! Put the smallest value at the front of the list.
+    TEMP_VAL(1) = SUM(VALUES(:, 1))
+    TEMP_IND = 1
+    DO I = 2, SIZE(VALUES, 2)
+       IF (SUM(VALUES(:, I)) < TEMP_VAL(1)) THEN
+          TEMP_VAL(1) = SUM(VALUES(:, I))
+          TEMP_IND = I
+       END IF
+    END DO
+    CALL DSWAP(SIZE(VALUES, 1), VALUES(:, 1), 1, VALUES(:, TEMP_IND), 1)
+    CALL SWAP_I64(INDICES(1), INDICES(TEMP_IND))
+    ! Insertion sort the rest of the array.
+    DO I = 3, SIZE(VALUES, 2)
+       TEMP_VAL(:) = VALUES(:, I)
+       TEMP_IND = INDICES(I, :)
+       ! Search backwards in the list, 
+       BEFORE = I - 1
+       AFTER  = I
+       DO WHILE (SUM(TEMP_VAL(:)) .LT. SUM(VALUES(:, BEFORE)))
+          VALUES(:, AFTER)  = VALUES(:, BEFORE)
+          INDICES(AFTER) = INDICES(BEFORE)
+          BEFORE = BEFORE - 1
+          AFTER  = AFTER - 1
+       END DO
+       ! Put the value into its place (where it is greater than the
+       ! element before it, but less than all values after it).
+       VALUES(:, AFTER)  = TEMP_VAL(:)
+       INDICES(AFTER) = TEMP_IND
+    END DO
+  END SUBROUTINE INSERTION_ARGSORT_DVEC
 END MODULE FAST_SORT

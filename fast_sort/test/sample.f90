@@ -37,6 +37,7 @@ VALUES_OLD(:, :) = VALUES(:, :)
 
 ! Sort the inputs.
 CALL ARGSORT_DVEC(VALUES, INDICES)
+!DO I = 1, N; WRITE(*,*) VALUES(:,I); END DO
 
 ! Check VALUES for out-of-order-type errors.
 ERROR = .FALSE.
